@@ -7,7 +7,7 @@ Tested on macOS 26.7 (Apple Silicon) with Python 3.12.14. Python 3.10 or newer i
 
 ```bash
 git clone https://github.com/peterdokim/yonder_takehome_embedded.git
-cd embedded-take-home
+cd yonder_takehome_embedded
 python3.12 -m venv .venv
 source .venv/bin/activate
 python --version                 # must print 3.10 or newer
