@@ -1,7 +1,5 @@
 # Methodology
 
-<!-- DRAFT written by the AI tool (Claude Code) from the work so far. Rewrite it in
-     your own words and delete this comment before submitting. -->
 
 ## 1. How to run it
 
