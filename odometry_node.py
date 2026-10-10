@@ -69,19 +69,18 @@ class OdometryNode(Node):
         # ------------------------------------------------------------------
         # Subscribers
         # ------------------------------------------------------------------
-        # TODO: Create a subscriber for /wheel_ticks.
-        #
-        # IMPORTANT: Check what QoS the encoder publisher uses (see
-        # sim/encoder_publisher.py). A mismatch means you will receive
-        # zero messages — with no error or warning, just silence.
-        # This is intentional and mirrors real ROS 2 behaviour.
-        #
-        # Hint: the QoS profile you need looks like:
-        #   QoSProfile(reliability=ReliabilityPolicy.???, depth=10)
-        #
-        # self.tick_sub = self.create_subscription(
-        #     WheelTicks, "/wheel_ticks", self.wheel_tick_callback, ???
-        # )
+        # Both sim publishers are BEST_EFFORT / VOLATILE (see sim/encoder_publisher.py).
+        # A RELIABLE subscriber can't be served by a BEST_EFFORT publisher, so the
+        # default QoS would connect to nothing. Match the publisher instead.
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            depth=10,
+        )
+
+        self.tick_sub = self.create_subscription(
+            WheelTicks, "/wheel_ticks", self.wheel_tick_callback, sensor_qos
+        )
 
         # TODO: Create a subscriber for /gps_estimate (same QoS considerations).
         #
@@ -169,7 +168,18 @@ class OdometryNode(Node):
         #      heading come from and how does it change? See "Heading is not
         #      measured" in the README before you write this line.
         #   6. Call self.publish_odometry().
-        pass
+        now = time.monotonic()
+        self.last_wheel_time = now
+        self.wheel_msg_count += 1
+
+        # Step 2: just show what arrives. Print once every 50 messages (~1 s)
+        # so the terminal stays readable at 50 Hz.
+        if self.wheel_msg_count % 50 == 0:
+            rate = self.wheel_msg_count / (now - self.start_time)
+            print(
+                f"[odom] ticks={msg.tick_count} stamp={msg.timestamp:.3f} "
+                f"msgs={self.wheel_msg_count} rate={rate:.1f}Hz"
+            )
 
     # -----------------------------------------------------------------------
     # GPS callback
