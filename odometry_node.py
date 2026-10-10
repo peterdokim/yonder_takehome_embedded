@@ -91,9 +91,7 @@ class OdometryNode(Node):
         # ------------------------------------------------------------------
         # Publisher
         # ------------------------------------------------------------------
-        # TODO: Create a publisher for /odom.
-        #
-        # self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
+        self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
 
         # ------------------------------------------------------------------
         # Timer — 1 Hz monitoring output
@@ -110,8 +108,10 @@ class OdometryNode(Node):
         self.heading: float = 0.0            # radians. The rover starts facing EAST (0 rad);
                                              # x is east, y is north, counter-clockwise is positive
 
+        self.velocity: float = 0.0           # forward speed from the wheels, m/s
+
         self.last_tick_count: int | None = None
-        self.last_tick_time: float | None = None
+        self.last_tick_time: float | None = None   # encoder timestamp of the last message
 
         self.last_gps_time: float | None = None
         self.last_wheel_time: float | None = None
@@ -172,13 +172,35 @@ class OdometryNode(Node):
         self.last_wheel_time = now
         self.wheel_msg_count += 1
 
-        # Step 2: just show what arrives. Print once every 50 messages (~1 s)
-        # so the terminal stays readable at 50 Hz.
+        # First message: nothing to difference against yet, just remember it.
+        if self.last_tick_count is None:
+            self.last_tick_count = msg.tick_count
+            self.last_tick_time = msg.timestamp
+            return
+
+        delta_ticks = msg.tick_count - self.last_tick_count
+        # Both timestamps are on the encoder's clock, so their difference is a
+        # valid duration even though that clock drifts from ours.
+        delta_time = msg.timestamp - self.last_tick_time
+        self.last_tick_count = msg.tick_count
+        self.last_tick_time = msg.timestamp
+
+        distance = delta_ticks * DIST_PER_TICK
+        if delta_time > 0.0:
+            self.velocity = distance / delta_time
+
+        # Step 3: wheels only, so there is no heading source yet. self.heading
+        # stays at its start value (0 = east) and the rover "drives" straight east.
+        self.x += distance * math.cos(self.heading)
+        self.y += distance * math.sin(self.heading)
+
+        self.publish_odometry()
+
+        # Temporary progress print (~1 Hz) until the step 6 monitoring output.
         if self.wheel_msg_count % 50 == 0:
-            rate = self.wheel_msg_count / (now - self.start_time)
             print(
-                f"[odom] ticks={msg.tick_count} stamp={msg.timestamp:.3f} "
-                f"msgs={self.wheel_msg_count} rate={rate:.1f}Hz"
+                f"[odom] pos=({self.x:.2f}, {self.y:.2f})m "
+                f"v={self.velocity:.2f}m/s ticks={msg.tick_count}"
             )
 
     # -----------------------------------------------------------------------
@@ -240,8 +262,23 @@ class OdometryNode(Node):
         Look up the real nav_msgs/Odometry definition for the full field list.
         Not every field is required — position is the minimum.
         """
-        # TODO: implement
-        pass
+        msg = Odometry()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "odom"
+        msg.child_frame_id = "base_link"
+
+        msg.pose.pose.position.x = self.x
+        msg.pose.pose.position.y = self.y
+        msg.pose.pose.orientation = Quaternion(
+            x=0.0,
+            y=0.0,
+            z=math.sin(self.heading / 2.0),
+            w=math.cos(self.heading / 2.0),
+        )
+
+        msg.twist.twist.linear.x = self.velocity
+
+        self.odom_pub.publish(msg)
 
     # -----------------------------------------------------------------------
     # Monitoring callback  (1 Hz)
