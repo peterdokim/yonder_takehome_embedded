@@ -116,7 +116,9 @@ class OdometryNode(Node):
         self.last_gps_time: float | None = None
         self.last_wheel_time: float | None = None
 
-        self.wheel_msg_count: int = 0
+        self.wheel_msg_count: int = 0        # every message received, duplicates included
+        self.duplicate_count: int = 0        # messages ignored as duplicates
+        self.bad_tick_count: int = 0         # messages ignored as backwards in ticks or time
         self.start_time: float = time.monotonic()   # use time.monotonic() to measure durations
 
     # -----------------------------------------------------------------------
@@ -178,16 +180,42 @@ class OdometryNode(Node):
             self.last_tick_time = msg.timestamp
             return
 
+        # DUPLICATE: a re-sent message carries exactly the same tick_count AND
+        # timestamp as the one before it. Both must match: a stopped rover also
+        # reports delta_ticks == 0, but with a new timestamp, and that is a real
+        # "moved 0 m" reading, not a duplicate.
+        if (
+            msg.tick_count == self.last_tick_count
+            and msg.timestamp == self.last_tick_time
+        ):
+            self.duplicate_count += 1
+            return
+
         delta_ticks = msg.tick_count - self.last_tick_count
         # Both timestamps are on the encoder's clock, so their difference is a
         # valid duration even though that clock drifts from ours.
         delta_time = msg.timestamp - self.last_tick_time
+
+        # The counter is cumulative and the encoder's clock only moves forward,
+        # so a message that goes backwards in either is not usable (a late
+        # arrival, or the counter restarting). Skip it without moving the
+        # baseline, so the next good message still differences correctly.
+        # This also guarantees delta_time > 0 for the division below.
+        if delta_ticks < 0 or delta_time <= 0.0:
+            self.bad_tick_count += 1
+            return
+
         self.last_tick_count = msg.tick_count
         self.last_tick_time = msg.timestamp
 
+        # DROPPED ticks are not handled here because they cannot be: a dropped
+        # tick just makes the cumulative count 1 lower than the truth, and a
+        # message with 7 new ticks looks the same whether 7 happened or 8 did
+        # and one was lost. So `distance` is biased slightly short and the
+        # position slowly falls behind; only an absolute reference (GPS, in
+        # gps_callback) can pull it back.
         distance = delta_ticks * DIST_PER_TICK
-        if delta_time > 0.0:
-            self.velocity = distance / delta_time
+        self.velocity = distance / delta_time
 
         # Step 3: wheels only, so there is no heading source yet. self.heading
         # stays at its start value (0 = east) and the rover "drives" straight east.
@@ -200,7 +228,8 @@ class OdometryNode(Node):
         if self.wheel_msg_count % 50 == 0:
             print(
                 f"[odom] pos=({self.x:.2f}, {self.y:.2f})m "
-                f"v={self.velocity:.2f}m/s ticks={msg.tick_count}"
+                f"v={self.velocity:.2f}m/s ticks={msg.tick_count} "
+                f"dup={self.duplicate_count} bad={self.bad_tick_count}"
             )
 
     # -----------------------------------------------------------------------
