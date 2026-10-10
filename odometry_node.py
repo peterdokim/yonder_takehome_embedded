@@ -461,6 +461,13 @@ class OdometryNode(Node):
             enc_text = f"enc={enc_age:.2f}s ago"
             if enc_age > WHEEL_STALE_S:
                 warnings.append("ENCODER STALE")
+                # The speed was measured from messages that have stopped
+                # coming, so it is no longer a measurement. Report 0 rather
+                # than repeating the last value for as long as the feed is
+                # down. The next good message sets it again.
+                if self.velocity != 0.0:
+                    self.velocity = 0.0
+                    self.publish_odometry()
         if abs(wheel_hz - EXPECTED_WHEEL_HZ) > WHEEL_RATE_TOLERANCE * EXPECTED_WHEEL_HZ:
             warnings.append("ENCODER RATE")
 

@@ -62,3 +62,23 @@
 **What the AI got wrong that I had to catch:** Nothing found in the code. The simulator never stops the encoder, so the live run cannot show the encoder warnings; the AI tested those by calling the callback directly instead. TODO: confirm, or note anything you spotted.
 
 **How I verified it ran correctly (not just that it compiled):** 60 s of `python sim/launch.py --seed 7`: 61 status lines, no tracebacks, rate between 49.8 and 50.2 Hz, and `WARN: GPS STALE` on exactly the three lines where the GPS age read 3, 4 and 5 s during the outage, clearing when fixes resumed. Calling the callback on a fresh node printed `enc=never` and `gps=never` with both "NO DATA" warnings, and 0.3 s after the last encoder message it printed `ENCODER STALE`.
+
+## 7. Step 7: long run with faults on
+
+**What I asked:** To run the node for several minutes with faults on and fix whatever turned up.
+
+**What I kept vs. rewrote, and why:** Kept one fix: when the encoder has been silent for more than 0.2 s, the monitor sets the velocity to 0 and publishes once, instead of repeating the last measured speed for as long as the feed is down. Nothing else was changed, because the long run showed no other problem. TODO: say whether you agree with reporting 0, or changed it.
+
+**What the AI got wrong that I had to catch:** The run itself found no fault. The stale velocity was found by reading the code, not by the run, because the simulator never stops the encoder. The AI's scoring script also wires up the simulator itself instead of going through `sim/launch.py`, so it is a close copy of the real launch, not the launch itself. TODO: confirm, or note anything you spotted.
+
+**How I verified it ran correctly (not just that it compiled):** 6 minutes of the real simulator classes with faults on (seed 7), scored against ground truth: 18,318 `/odom` messages with none non-finite, mean position error 0.26 m against 0.54 m for raw GPS, worst 1.17 m, mean heading error 5.3 degrees, per-minute mean between 0.21 and 0.32 m with no upward trend, 360 status lines, no tracebacks, and `GPS STALE` on 24 lines (three per outage, eight outages). The velocity fix was tested by calling the callbacks directly: 0.52 m/s while moving, 0.0 published once after 0.3 s of silence, 0.51 m/s again on the next message. A 60 s rerun after the fix gave 0.30 m against 0.63 m for GPS with no encoder warnings. TODO: run `python sim/launch.py --visualize` for a few minutes yourself and confirm the blue error stays below the GPS dots.
+
+## 8. Write-up documents
+
+**What I asked:** To draft `METHODOLOGY.md` and bring this log up to date.
+
+**What I kept vs. rewrote, and why:** TODO: the AI wrote first drafts of both files from the session history. Say what you rewrote; the README asks for these in your own words.
+
+**What the AI got wrong that I had to catch:** TODO.
+
+**How I verified it ran correctly (not just that it compiled):** TODO: follow the run steps in `METHODOLOGY.md` in a clean clone and confirm they work as written.
