@@ -6,7 +6,7 @@
 Tested on macOS 26.7 (Apple Silicon) with Python 3.12.14. Python 3.10 or newer is required: the simulator uses `float | None` type hints, which crash on 3.9.
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/peterdokim/yonder_takehome_embedded.git
 cd embedded-take-home
 python3.12 -m venv .venv
 source .venv/bin/activate
