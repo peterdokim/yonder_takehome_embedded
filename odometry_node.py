@@ -50,6 +50,36 @@ WHEEL_RADIUS_M = 0.075          # metres
 TICKS_PER_REVOLUTION = 360
 DIST_PER_TICK = (2.0 * math.pi * WHEEL_RADIUS_M) / TICKS_PER_REVOLUTION  # ~0.00131 m
 
+# --------------------------------------------------------------------------
+# Fusion tuning  (my choices — see "Your write-up" in the README)
+# --------------------------------------------------------------------------
+# How fast the wheel-derived position gets less trustworthy: variance (m²)
+# added per metre driven. Not a measured property of the encoder; it is the
+# knob that sets how hard GPS pulls. Bigger = follow GPS more closely.
+WHEEL_DRIFT_VAR_PER_M = 0.04
+
+# Fraction of the heading error implied by one GPS fix that is applied to the
+# heading, and to the turn-per-metre estimate. Both are also scaled by the
+# position gain, so a noisy fix moves them less.
+HEADING_GAIN = 0.3
+CURVATURE_GAIN = 0.02
+
+# Below this distance since the last fix, sideways GPS error says nothing
+# about heading (a stopped rover would just be steering on GPS noise).
+MIN_HEADING_BASELINE_M = 0.1
+
+# Never believe a turn tighter than this radius; stops a bad run of fixes
+# from winding the turn estimate up without limit.
+MAX_CURVATURE = 1.0 / 0.5       # rad per metre
+
+# Floor for the GPS variance so a bogus covariance of 0 can't take the gain to 1.
+MIN_GPS_VARIANCE = 1e-4         # m²
+
+
+def wrap_angle(angle: float) -> float:
+    """Wrap an angle to (-pi, pi]."""
+    return math.atan2(math.sin(angle), math.cos(angle))
+
 
 class OdometryNode(Node):
     """
@@ -82,11 +112,9 @@ class OdometryNode(Node):
             WheelTicks, "/wheel_ticks", self.wheel_tick_callback, sensor_qos
         )
 
-        # TODO: Create a subscriber for /gps_estimate (same QoS considerations).
-        #
-        # self.gps_sub = self.create_subscription(
-        #     GPSEstimate, "/gps_estimate", self.gps_callback, ???
-        # )
+        self.gps_sub = self.create_subscription(
+            GPSEstimate, "/gps_estimate", self.gps_callback, sensor_qos
+        )
 
         # ------------------------------------------------------------------
         # Publisher
@@ -109,6 +137,20 @@ class OdometryNode(Node):
                                              # x is east, y is north, counter-clockwise is positive
 
         self.velocity: float = 0.0           # forward speed from the wheels, m/s
+
+        # Turn per metre driven (rad/m, positive = turning left). There is no
+        # heading sensor, so this is learned from GPS in gps_callback and used
+        # to keep the heading turning between fixes. Starts at 0 = straight.
+        self.curvature: float = 0.0
+
+        # Uncertainty (variance, m²) of the fused position. 0 at the start
+        # because the start position is given exactly; grows as we drive on
+        # wheels alone and shrinks at every GPS fix.
+        self.pos_var: float = 0.0
+
+        self.dist_since_gps: float = 0.0     # metres driven since the last GPS fix
+        self.gps_msg_count: int = 0
+        self.gps_rejected_count: int = 0     # GPS messages ignored as not finite
 
         self.last_tick_count: int | None = None
         self.last_tick_time: float | None = None   # encoder timestamp of the last message
@@ -217,10 +259,19 @@ class OdometryNode(Node):
         distance = delta_ticks * DIST_PER_TICK
         self.velocity = distance / delta_time
 
-        # Step 3: wheels only, so there is no heading source yet. self.heading
-        # stays at its start value (0 = east) and the rover "drives" straight east.
-        self.x += distance * math.cos(self.heading)
-        self.y += distance * math.sin(self.heading)
+        # Dead reckoning: move `distance` along the heading, and turn the
+        # heading by (turn per metre) x distance. Using the heading halfway
+        # through the step makes a constant turn come out as an arc rather
+        # than a string of straight segments.
+        turn = self.curvature * distance
+        mid_heading = self.heading + 0.5 * turn
+        self.x += distance * math.cos(mid_heading)
+        self.y += distance * math.sin(mid_heading)
+        self.heading = wrap_angle(self.heading + turn)
+
+        # Every metre on wheels alone makes the position a little less certain.
+        self.pos_var += WHEEL_DRIFT_VAR_PER_M * distance
+        self.dist_since_gps += distance
 
         self.publish_odometry()
 
@@ -228,7 +279,7 @@ class OdometryNode(Node):
         if self.wheel_msg_count % 50 == 0:
             print(
                 f"[odom] pos=({self.x:.2f}, {self.y:.2f})m "
-                f"v={self.velocity:.2f}m/s ticks={msg.tick_count} "
+                f"hdg={math.degrees(self.heading):.0f}deg v={self.velocity:.2f}m/s "
                 f"dup={self.duplicate_count} bad={self.bad_tick_count}"
             )
 
@@ -257,14 +308,57 @@ class OdometryNode(Node):
             How do you weight them? Should the weighting change over time?
             (That's Stretch Goal B — but even a fixed weighting is fine here.)
         """
-        # TODO: implement
+        # Arrival time on OUR monotonic clock, for the staleness monitor.
+        self.last_gps_time = time.monotonic()
+        self.gps_msg_count += 1
+
+        if not (
+            math.isfinite(msg.x)
+            and math.isfinite(msg.y)
+            and math.isfinite(msg.covariance)
+        ):
+            self.gps_rejected_count += 1
+            return
+
+        # --- Position: variance-weighted average (the README's worked example).
+        # gain = share of the correction taken from GPS. It is large when we
+        # have driven far since the last fix (pos_var grew) and small when the
+        # fix is noisy (big covariance).
+        gps_var = max(msg.covariance, MIN_GPS_VARIANCE)
+        gain = self.pos_var / (self.pos_var + gps_var)
+
+        err_x = msg.x - self.x
+        err_y = msg.y - self.y
+        # Sideways part of the error: positive = GPS puts us to the LEFT of
+        # where we think we are, relative to the way we think we are facing.
+        cross = -math.sin(self.heading) * err_x + math.cos(self.heading) * err_y
+
+        self.x += gain * err_x
+        self.y += gain * err_y
+        self.pos_var *= (1.0 - gain)
+
+        # --- Heading: no sensor gives it, so infer it from the sideways error.
+        # Driving `baseline` metres with a heading that is off by a small angle
+        # puts us sideways by about baseline x angle, so cross / baseline is the
+        # heading error this fix implies. One fix is far too noisy to believe
+        # outright (0.3 m of GPS noise over 0.5 m of travel), so take a small
+        # fraction of it each time and let the fixes average out.
         #
-        # Suggested approach:
-        #   1. Compute a weight w_gps based on msg.covariance (lower cov = higher trust).
-        #   2. Blend: self.x = (1 - w_gps) * self.x + w_gps * msg.x
-        #             self.y = (1 - w_gps) * self.y + w_gps * msg.y
-        #   3. Update self.last_gps_time = msg.timestamp
-        pass
+        # If we keep having to nudge the heading the same way, the rover is
+        # turning more than we think, so the same error also adjusts the turn
+        # per metre. That is what lets the heading keep up on a curve between
+        # fixes and through a GPS outage.
+        baseline = self.dist_since_gps
+        if baseline >= MIN_HEADING_BASELINE_M:
+            implied_heading_err = cross / baseline
+            self.heading = wrap_angle(
+                self.heading + HEADING_GAIN * gain * implied_heading_err
+            )
+            self.curvature += CURVATURE_GAIN * gain * implied_heading_err / baseline
+            self.curvature = max(-MAX_CURVATURE, min(MAX_CURVATURE, self.curvature))
+        self.dist_since_gps = 0.0
+
+        self.publish_odometry()
 
     # -----------------------------------------------------------------------
     # Odometry publisher
@@ -306,6 +400,7 @@ class OdometryNode(Node):
         )
 
         msg.twist.twist.linear.x = self.velocity
+        msg.twist.twist.angular.z = self.curvature * self.velocity   # rad/m x m/s
 
         self.odom_pub.publish(msg)
 

@@ -32,3 +32,23 @@
 **What the AI got wrong that I had to catch:** It reported the step as working without opening the `--visualize` window, which is the README's check for this step. When I ran it, the blue line started at (0.56, 0) instead of (0, 0). The AI's explanation was that the visualizer subscribes to `/odom` about a second after the node starts (it imports matplotlib first), so it misses the first ~0.56 m; that came from reading `sim/launch.py`, not from a test. Also, the printed velocity jitters between 0.49 and 0.55 m/s because each message carries 7 or 8 whole ticks; the AI left it unsmoothed.
 
 **How I verified it ran correctly (not just that it compiled):** The terminal shows x growing by 0.50 m per second with y at 0, starting from `pos=(0.49, 0.00)` after the first 50 messages, so the node itself counts up from zero. TODO: confirm the blue error in the bottom plot started near 0 m, which is what separates "plot started late" from "node has a 0.56 m offset".
+
+## 4. Step 4: duplicates, dropped ticks, safe velocity
+
+**What I asked:** To handle the injected encoder noise so nothing crashes or produces NaN/infinity.
+
+**What I kept vs. rewrote, and why:** Kept the generated guards: a message is a duplicate only if both `tick_count` and `timestamp` equal the previous one (a stopped rover has the same ticks but a new timestamp, and is still processed), and anything going backwards in ticks or time is skipped and counted. Dropped ticks are not detected because they cannot be; the comment in the callback says why. TODO: say whether you changed anything.
+
+**What the AI got wrong that I had to catch:** Nothing found in the code. It did not measure the dropped-tick drift, so the README's "~6 cm per minute" was unverified at this step. TODO: confirm, or note anything you spotted.
+
+**How I verified it ran correctly (not just that it compiled):** 60 s with faults on (`--seed 7`): no tracebacks, 63 duplicates ignored out of about 3,150 messages (2.0%, matching the simulator's 2% rate), `bad=0`, and printed velocity stayed between 0.39 and 0.57 m/s against a true 0.50.
+
+## 5. Step 5: GPS fusion and heading
+
+**What I asked:** To subscribe to `/gps_estimate`, fuse it with the wheel position, and decide where heading comes from, without hard-coding the circle.
+
+**What I kept vs. rewrote, and why:** Kept the generated design. Position is a variance-weighted average: the wheel position's variance grows per metre driven and the GPS weight is `pos_var / (pos_var + covariance)`, so noisy fixes after an outage count for less. Heading is inferred from the sideways part of each GPS correction divided by the distance driven since the last fix, applied as a small fraction; the same error also adjusts a turn-per-metre estimate that keeps the heading turning between fixes and through outages. TODO: rewrite this in your own words; this is the part you will be asked to explain.
+
+**What the AI got wrong that I had to catch:** Its first choice of the three gains (0.005, 0.5, 0.1) was a guess, and it was worse than using raw GPS: mean error 0.90 m against 0.54 m for the GPS fixes, with heading off by about 23 degrees. That fails the README's step 5 check. It found this itself with an offline replay script, not by reasoning, then searched the gains over seven path variants. The first search's best values were on the edge of the range searched, so it widened the search before choosing 0.04, 0.3, 0.02. TODO: note anything you spotted in the plot.
+
+**How I verified it ran correctly (not just that it compiled):** The AI's offline replay (its own copy of the encoder and GPS noise models, not the real simulator) on 20 seeds not used for tuning, 300 s each: mean error 0.27 m on the README circle against 0.54 m for raw GPS, and 0.24 to 0.42 m on the other paths (clockwise, radius 4 m, radius 30 m at 1.5 m/s, 0.2 m/s, straight, S-curve). Worst single spike was 2.7 m on the S-curve, in the noisy seconds after an outage. Live run of `python sim/launch.py --seed 7` for 100 s: no tracebacks, heading went from 0 round through 180 degrees. TODO: run `python sim/launch.py --visualize` yourself and confirm the blue error in the bottom plot sits below the GPS dots; the AI did not open the window.
