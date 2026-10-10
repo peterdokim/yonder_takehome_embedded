@@ -75,6 +75,23 @@ MAX_CURVATURE = 1.0 / 0.5       # rad per metre
 # Floor for the GPS variance so a bogus covariance of 0 can't take the gain to 1.
 MIN_GPS_VARIANCE = 1e-4         # m²
 
+# --------------------------------------------------------------------------
+# Monitoring thresholds  (my choices — see "Your write-up" in the README)
+# --------------------------------------------------------------------------
+EXPECTED_WHEEL_HZ = 50.0
+
+# Encoder messages are 20 ms apart, so 0.2 s of silence is 10 missed in a row:
+# far more than scheduling jitter, and still only 10 cm of unseen travel.
+WHEEL_STALE_S = 0.2
+
+# GPS fixes are 1 s apart. 2.5 s means two in a row are missing, so one late
+# fix does not warn but the simulator's 5 s outage does.
+GPS_STALE_S = 2.5
+
+# Warn if the measured encoder rate is more than 10% away from expected.
+# Counting over 1 s gives 49-51 Hz on a healthy feed, so 10% never trips on that.
+WHEEL_RATE_TOLERANCE = 0.10
+
 
 def wrap_angle(angle: float) -> float:
     """Wrap an angle to (-pi, pi]."""
@@ -124,9 +141,7 @@ class OdometryNode(Node):
         # ------------------------------------------------------------------
         # Timer — 1 Hz monitoring output
         # ------------------------------------------------------------------
-        # TODO: Create a timer that calls self.monitoring_callback once per second.
-        #
-        # self.monitor_timer = self.create_timer(1.0, self.monitoring_callback)
+        self.monitor_timer = self.create_timer(1.0, self.monitoring_callback)
 
         # ------------------------------------------------------------------
         # State  — add whatever you need
@@ -162,6 +177,12 @@ class OdometryNode(Node):
         self.duplicate_count: int = 0        # messages ignored as duplicates
         self.bad_tick_count: int = 0         # messages ignored as backwards in ticks or time
         self.start_time: float = time.monotonic()   # use time.monotonic() to measure durations
+
+        # For the receive rate: when the monitor last ran, and the message and
+        # duplicate counts at that moment.
+        self.last_monitor_time: float = self.start_time
+        self.last_monitor_wheel_count: int = 0
+        self.last_monitor_duplicate_count: int = 0
 
     # -----------------------------------------------------------------------
     # Wheel encoder callback
@@ -274,14 +295,6 @@ class OdometryNode(Node):
         self.dist_since_gps += distance
 
         self.publish_odometry()
-
-        # Temporary progress print (~1 Hz) until the step 6 monitoring output.
-        if self.wheel_msg_count % 50 == 0:
-            print(
-                f"[odom] pos=({self.x:.2f}, {self.y:.2f})m "
-                f"hdg={math.degrees(self.heading):.0f}deg v={self.velocity:.2f}m/s "
-                f"dup={self.duplicate_count} bad={self.bad_tick_count}"
-            )
 
     # -----------------------------------------------------------------------
     # GPS callback
@@ -424,8 +437,51 @@ class OdometryNode(Node):
         Example format (feel free to change the layout):
             [odom] pos=(1.23, 0.45)m  enc=0.02s ago @49.8Hz  gps=0.91s ago
         """
-        # TODO: implement
-        pass
+        now = time.monotonic()
+
+        # Receive rate over the time since the last report (measured, not
+        # assumed to be exactly 1 s, because the timer itself can run late).
+        # Duplicates are left out: a re-sent message is not a new reading, and
+        # counting them would hide real message loss behind a healthy number.
+        window = now - self.last_monitor_time
+        received = self.wheel_msg_count - self.last_monitor_wheel_count
+        duplicates = self.duplicate_count - self.last_monitor_duplicate_count
+        wheel_hz = (received - duplicates) / window if window > 0.0 else 0.0
+        self.last_monitor_time = now
+        self.last_monitor_wheel_count = self.wheel_msg_count
+        self.last_monitor_duplicate_count = self.duplicate_count
+
+        warnings = []
+
+        if self.last_wheel_time is None:
+            enc_text = "enc=never"
+            warnings.append("NO ENCODER DATA")
+        else:
+            enc_age = now - self.last_wheel_time
+            enc_text = f"enc={enc_age:.2f}s ago"
+            if enc_age > WHEEL_STALE_S:
+                warnings.append("ENCODER STALE")
+        if abs(wheel_hz - EXPECTED_WHEEL_HZ) > WHEEL_RATE_TOLERANCE * EXPECTED_WHEEL_HZ:
+            warnings.append("ENCODER RATE")
+
+        if self.last_gps_time is None:
+            gps_text = "gps=never"
+            warnings.append("NO GPS DATA")
+        else:
+            gps_age = now - self.last_gps_time
+            gps_text = f"gps={gps_age:.2f}s ago"
+            if gps_age > GPS_STALE_S:
+                warnings.append("GPS STALE")
+
+        line = (
+            f"[odom] pos=({self.x:.2f}, {self.y:.2f})m "
+            f"hdg={math.degrees(self.heading):.0f}deg v={self.velocity:.2f}m/s  "
+            f"{enc_text} @{wheel_hz:.1f}Hz (expect {EXPECTED_WHEEL_HZ:.0f})  {gps_text}  "
+            f"dup={self.duplicate_count} bad={self.bad_tick_count}"
+        )
+        if warnings:
+            line += "  WARN: " + ", ".join(warnings)
+        print(line)
 
 
 # ---------------------------------------------------------------------------

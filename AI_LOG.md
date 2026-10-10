@@ -52,3 +52,13 @@
 **What the AI got wrong that I had to catch:** Its first choice of the three gains (0.005, 0.5, 0.1) was a guess, and it was worse than using raw GPS: mean error 0.90 m against 0.54 m for the GPS fixes, with heading off by about 23 degrees. That fails the README's step 5 check. It found this itself with an offline replay script, not by reasoning, then searched the gains over seven path variants. The first search's best values were on the edge of the range searched, so it widened the search before choosing 0.04, 0.3, 0.02. TODO: note anything you spotted in the plot.
 
 **How I verified it ran correctly (not just that it compiled):** The AI's offline replay (its own copy of the encoder and GPS noise models, not the real simulator) on 20 seeds not used for tuning, 300 s each: mean error 0.27 m on the README circle against 0.54 m for raw GPS, and 0.24 to 0.42 m on the other paths (clockwise, radius 4 m, radius 30 m at 1.5 m/s, 0.2 m/s, straight, S-curve). Worst single spike was 2.7 m on the S-curve, in the noisy seconds after an outage. Live run of `python sim/launch.py --seed 7` for 100 s: no tracebacks, heading went from 0 round through 180 degrees. TODO: run `python sim/launch.py --visualize` yourself and confirm the blue error in the bottom plot sits below the GPS dots; the AI did not open the window.
+
+## 6. Step 6: monitoring output
+
+**What I asked:** To implement the once-per-second status line: time since each source, `/wheel_ticks` rate against 50 Hz, and the fused position.
+
+**What I kept vs. rewrote, and why:** Kept the generated callback and its thresholds: encoder stale after 0.2 s (10 missed messages), GPS stale after 2.5 s (two missed fixes), and a rate warning outside 45 to 55 Hz. Ages use `time.monotonic()` at arrival, not `msg.timestamp`, because the encoder clock drifts. The rate leaves duplicates out, so a re-sent message cannot hide a lost one. TODO: say whether you agree with the thresholds or changed them; the write-up asks why you chose them.
+
+**What the AI got wrong that I had to catch:** Nothing found in the code. The simulator never stops the encoder, so the live run cannot show the encoder warnings; the AI tested those by calling the callback directly instead. TODO: confirm, or note anything you spotted.
+
+**How I verified it ran correctly (not just that it compiled):** 60 s of `python sim/launch.py --seed 7`: 61 status lines, no tracebacks, rate between 49.8 and 50.2 Hz, and `WARN: GPS STALE` on exactly the three lines where the GPS age read 3, 4 and 5 s during the outage, clearing when fixes resumed. Calling the callback on a fresh node printed `enc=never` and `gps=never` with both "NO DATA" warnings, and 0.3 s after the last encoder message it printed `ENCODER STALE`.
